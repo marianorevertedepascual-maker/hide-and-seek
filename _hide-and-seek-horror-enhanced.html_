@@ -1,0 +1,537 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hide & Seek - Horror Enhanced</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:#000; font-family:'Georgia',serif; overflow:hidden; width:100vw; height:100vh; color:#fff; }
+
+.screen { position:fixed; inset:0; display:none; flex-direction:column; align-items:center; justify-content:center; z-index:100; }
+.screen.active { display:flex; }
+
+#loading-screen { background:#000; z-index:999; }
+#loading-screen h1 { font-size:3rem; color:#cc0000; text-shadow:0 0 20px #ff0000; animation:flicker 1.5s infinite; }
+#loading-bar-container { width:300px; height:8px; background:#1a0000; border:1px solid #ff0000; margin-top:20px; border-radius:4px; overflow:hidden; }
+#loading-bar { height:100%; background:linear-gradient(90deg,#ff0000,#ff4444); width:0%; transition:width 0.3s; }
+#loading-text { color:#888; margin-top:10px; font-size:0.85rem; letter-spacing:2px; }
+
+#main-menu { background:radial-gradient(ellipse at center,#0a0005 0%,#000 100%); }
+#main-menu h1 { font-size:4rem; color:#cc0000; text-shadow:0 0 40px #ff0000; letter-spacing:6px; margin-bottom:10px; animation:flicker 3s infinite; }
+.subtitle { color:#660000; font-size:1rem; letter-spacing:4px; margin-bottom:50px; }
+.menu-btn { background:transparent; border:1px solid #660000; color:#cc4444; font-size:1.1rem; padding:12px 50px; margin:6px; cursor:pointer; letter-spacing:3px; text-transform:uppercase; transition:all 0.3s; font-family:inherit; min-width:280px; }
+.menu-btn:hover { background:#1a0000; border-color:#ff0000; color:#ff4444; box-shadow:0 0 20px #ff000044; transform:scale(1.02); }
+
+#game-canvas { position:fixed; inset:0; display:none; }
+#hud { position:fixed; inset:0; pointer-events:none; display:none; z-index:50; }
+#objective-box { position:absolute; top:20px; left:50%; transform:translateX(-50%); background:rgba(0,0,0,0.7); border:1px solid #660000; color:#cc4444; padding:10px 24px; font-size:0.9rem; letter-spacing:2px; text-align:center; }
+#noise-meter { position:absolute; bottom:40px; left:50%; transform:translateX(-50%); text-align:center; }
+#noise-label { color:#cc4444; font-size:0.8rem; letter-spacing:2px; margin-bottom:6px; }
+#noise-bar-bg { width:200px; height:8px; background:#1a0000; border:1px solid #440000; border-radius:4px; overflow:hidden; }
+#noise-bar-fill { height:100%; background:linear-gradient(90deg,#004400,#ffaa00,#ff0000); width:0%; transition:width 0.1s; }
+#crosshair { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); width:16px; height:16px; opacity:0.6; }
+#crosshair::before,#crosshair::after { content:''; position:absolute; background:#ffffff88; }
+#crosshair::before { width:2px; height:100%; left:50%; transform:translateX(-50%); }
+#crosshair::after { width:100%; height:2px; top:50%; transform:translateY(-50%); }
+#minimap { position:absolute; top:16px; left:16px; border:1px solid #440000; border-radius:3px; opacity:0.7; }
+#game-over, #win-screen { background:rgba(0,0,0,0.97); gap:16px; z-index:200; }
+#game-over h1 { font-size:4rem; color:#cc0000; text-shadow:0 0 20px #ff0000; animation:flicker 0.8s infinite; }
+
+@keyframes flicker { 0%,96%,100%{opacity:1} 97%{opacity:0.4} 98%{opacity:1} }
+</style>
+</head>
+<body>
+
+<div id="loading-screen" class="screen active">
+  <h1>👁 HIDE & SEEK</h1>
+  <div id="loading-bar-container"><div id="loading-bar"></div></div>
+  <div id="loading-text">CARGANDO...</div>
+</div>
+
+<div id="main-menu" class="screen">
+  <h1>HIDE & SEEK</h1>
+  <div class="subtitle">— NO CORRAS. NO GRITES. NO MIRES —</div>
+  <button class="menu-btn" id="btn-new-game">▶ NUEVA PARTIDA</button>
+  <button class="menu-btn" id="btn-settings">⚙ AJUSTES</button>
+  <button class="menu-btn" id="btn-quit" style="margin-top:20px;color:#440000;border-color:#220000;">✕ SALIR</button>
+</div>
+
+<canvas id="game-canvas"></canvas>
+<canvas id="minimap" width="150" height="150" style="position:fixed;top:16px;left:16px;z-index:60;display:none;border:1px solid #440000;opacity:0.75;"></canvas>
+
+<div id="hud">
+  <div id="objective-box">📋 OBJETIVO: <span id="objective-text">Busca un escondite</span></div>
+  <div id="crosshair"></div>
+  <div id="noise-meter">
+    <div id="noise-label">🔇 RUIDO</div>
+    <div id="noise-bar-bg"><div id="noise-bar-fill"></div></div>
+  </div>
+</div>
+
+<div id="game-over" class="screen"><h1>TE ENCONTRÓ</h1><p>NO PUDISTE ESCAPAR...</p><button class="menu-btn" id="btn-retry">↩ INTENTAR DE NUEVO</button></div>
+
+<script>
+const $ = id => document.getElementById(id);
+
+// GLOBALS
+let gameState = 'loading';
+let frameId = null;
+const canvas = $('game-canvas');
+const ctx = canvas.getContext('2d');
+let W = window.innerWidth, H = window.innerHeight;
+const FOV = Math.PI / 3;
+const HALF_FOV = FOV / 2;
+const MAX_DEPTH = 30;
+
+// PLAYER
+let player = { x:4.5, y:4.5, angle:0, speed:3 };
+let keys = {};
+let isPointerLocked = false;
+let noiseLevel = 0;
+
+// KILLER
+let killer = { x:15.5, y:15.5, angle:0, speed:1.4 };
+
+// ══════════════════════════════════════════════════════════════
+//  TEXTURAS PROCEDURALES
+// ══════════════════════════════════════════════════════════════
+function generateBrickTexture(w, h, seed) {
+  const canvas = document.createElement('canvas');
+  canvas.width = w; canvas.height = h;
+  const ctx = canvas.getContext('2d');
+  
+  // Patrón de ladrillos
+  const brickW = 32, brickH = 16;
+  for(let y = 0; y < h; y += brickH) {
+    for(let x = 0; x < w; x += brickW) {
+      const offset = (Math.floor(y/brickH) % 2) * brickW/2;
+      const hue = (seed + Math.floor(x/brickW) + Math.floor(y/brickH)) % 5;
+      const colors = ['#6b3d2a', '#7a4a35', '#5a3220', '#8b5a3c', '#4a2015'];
+      ctx.fillStyle = colors[hue];
+      ctx.fillRect(x+offset, y, brickW-2, brickH-2);
+      ctx.strokeStyle = '#3a2010';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(x+offset, y, brickW-2, brickH-2);
+    }
+  }
+  return canvas;
+}
+
+function generateWoodTexture(w, h, seed) {
+  const canvas = document.createElement('canvas');
+  canvas.width = w; canvas.height = h;
+  const ctx = canvas.getContext('2d');
+  const imgData = ctx.createImageData(w, h);
+  const data = imgData.data;
+  
+  for(let i = 0; i < w*h*4; i += 4) {
+    const idx = i/4;
+    const x = idx % w;
+    const y = Math.floor(idx / w);
+    const noise = Math.sin(x*0.1)*Math.cos(y*0.05) * 30;
+    const r = 120 + noise;
+    const g = 85 + noise*0.7;
+    const b = 50 + noise*0.5;
+    data[i] = Math.max(50, Math.min(200, r));
+    data[i+1] = Math.max(40, Math.min(150, g));
+    data[i+2] = Math.max(30, Math.min(100, b));
+    data[i+3] = 255;
+  }
+  ctx.putImageData(imgData, 0, 0);
+  return canvas;
+}
+
+// ══════════════════════════════════════════════════════════════
+//  MAPA MEJORADO (0=piso, 1=pared, 2=escondite, 3=mueble)
+// ══════════════════════════════════════════════════════════════
+const MAP_W = 32, MAP_H = 24;
+const MAP = [
+  [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
+  [1,0,0,0,0,0,0,3,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  [1,0,3,3,0,0,0,3,3,0,0,0,0,0,0,0,0,0,0,0,3,3,0,0,0,0,0,0,0,0,0,1],
+  [1,0,3,3,0,0,0,0,0,0,0,1,0,0,0,0,1,0,0,0,3,3,0,0,0,0,0,0,0,0,0,1],
+  [1,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2,0,0,0,0,1],
+  [1,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  [1,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  [1,0,3,0,0,0,0,0,0,0,0,1,0,0,0,0,1,0,0,0,0,2,0,0,0,3,0,0,0,0,0,1],
+  [1,0,3,0,0,0,0,0,0,0,0,1,1,1,1,1,1,0,0,0,0,0,0,0,0,3,0,0,0,0,0,1],
+  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  [1,0,0,0,0,0,0,3,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2,0,0,0,0,0,1],
+  [1,0,0,0,0,0,0,3,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  [1,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  [1,0,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2,0,0,1],
+  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
+];
+
+// RAYCASTING CON TEXTURAS MEJORADAS
+function castRay(px, py, angle) {
+  const sin = Math.sin(angle), cos = Math.cos(angle);
+  for (let depth = 0.05; depth < MAX_DEPTH; depth += 0.05) {
+    const rx = px + cos * depth;
+    const ry = py + sin * depth;
+    const mx = Math.floor(rx), my = Math.floor(ry);
+    if (mx < 0 || mx >= MAP_W || my < 0 || my >= MAP_H) return { depth, type: 1, side: 0 };
+    const cell = MAP[my][mx];
+    if (cell !== 0) {
+      const side = Math.abs(rx - Math.round(rx)) < Math.abs(ry - Math.round(ry)) ? 0 : 1;
+      return { depth, type: cell, side };
+    }
+  }
+  return { depth: MAX_DEPTH, type: 0, side: 0 };
+}
+
+function renderScene() {
+  const NUM_RAYS = W;
+  ctx.clearRect(0, 0, W, H);
+  
+  // Cielo y suelo degradado
+  const skyGrad = ctx.createLinearGradient(0, 0, 0, H/2);
+  skyGrad.addColorStop(0, '#0a0808');
+  skyGrad.addColorStop(1, '#1a1008');
+  ctx.fillStyle = skyGrad;
+  ctx.fillRect(0, 0, W, H/2);
+  
+  const floorGrad = ctx.createLinearGradient(0, H/2, 0, H);
+  floorGrad.addColorStop(0, '#2a1a08');
+  floorGrad.addColorStop(1, '#1a0a04');
+  ctx.fillStyle = floorGrad;
+  ctx.fillRect(0, H/2, W, H/2);
+
+  // Raycasting con iluminación mejorada
+  for (let col = 0; col < NUM_RAYS; col++) {
+    const rayAngle = (player.angle - HALF_FOV) + (col / NUM_RAYS) * FOV;
+    const { depth, type, side } = castRay(player.x, player.y, rayAngle);
+
+    const corrected = depth * Math.cos(rayAngle - player.angle);
+    const wallH = Math.min(H, Math.floor(H / corrected));
+    const top = Math.floor((H - wallH) / 2);
+
+    let brightness = Math.max(0.2, 1 - corrected / MAX_DEPTH);
+    if (side === 1) brightness *= 0.7;
+
+    // Fog effect
+    brightness *= Math.max(0.3, 1 - corrected / 25);
+
+    let wr = Math.floor(110 * brightness);
+    let wg = Math.floor(68 * brightness);
+    let wb = Math.floor(34 * brightness);
+
+    // Variación de color por tipo de pared
+    if (type === 3) { // Muebles
+      wr *= 0.7; wg *= 0.6; wb *= 0.8;
+    }
+
+    ctx.fillStyle = `rgb(${wr},${wg},${wb})`;
+    ctx.fillRect(col, top, 1, wallH);
+
+    // Detalles de ladrillos
+    if (col % 4 === 0 && wallH > 50) {
+      const brickPattern = Math.floor((top + wallH/2) / 8) % 2;
+      if (brickPattern === 0) {
+        ctx.fillStyle = `rgba(0,0,0,${0.1*brightness})`;
+        ctx.fillRect(col, top + wallH*0.4, 1, 2);
+      }
+    }
+  }
+}
+
+function renderSprite(entity, color, label) {
+  const dx = entity.x - player.x;
+  const dy = entity.y - player.y;
+  const dist = Math.sqrt(dx*dx + dy*dy);
+  if (dist > 18) return;
+
+  const spriteAngle = Math.atan2(dy, dx);
+  let angleDiff = spriteAngle - player.angle;
+  while (angleDiff > Math.PI) angleDiff -= 2*Math.PI;
+  while (angleDiff < -Math.PI) angleDiff += 2*Math.PI;
+  if (Math.abs(angleDiff) > HALF_FOV * 1.5) return;
+
+  const screenX = Math.floor((0.5 + angleDiff / FOV) * W);
+  const spriteH = Math.min(H * 1.8, Math.floor(H / dist));
+  const spriteW = Math.floor(spriteH * 0.4);
+  const top = Math.floor((H - spriteH) / 2);
+  const brightness = Math.max(0, 1 - dist / 16) * Math.max(0.3, 1 - dist / 22);
+
+  ctx.save();
+  ctx.globalAlpha = Math.min(1, brightness * 1.2);
+
+  // Cuerpo detallado
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.moveTo(screenX - spriteW/2, top + spriteH*0.25);
+  ctx.lineTo(screenX + spriteW/2, top + spriteH*0.25);
+  ctx.lineTo(screenX + spriteW*0.6, top + spriteH*0.65);
+  ctx.lineTo(screenX - spriteW*0.6, top + spriteH*0.65);
+  ctx.closePath();
+  ctx.fill();
+
+  // Cabeza con detalles
+  ctx.fillStyle = '#c8704a';
+  ctx.beginPath();
+  ctx.ellipse(screenX, top + spriteH*0.15, spriteW*0.5, spriteW*0.6, 0, 0, Math.PI*2);
+  ctx.fill();
+
+  // Ojos brillantes
+  ctx.fillStyle = entity === killer ? '#ff2200' : '#ffff99';
+  const eyeSize = spriteW * 0.15;
+  ctx.beginPath();
+  ctx.arc(screenX - spriteW*0.18, top + spriteH*0.1, eyeSize, 0, Math.PI*2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(screenX + spriteW*0.18, top + spriteH*0.1, eyeSize, 0, Math.PI*2);
+  ctx.fill();
+
+  // Pupilas
+  ctx.fillStyle = '#000';
+  ctx.beginPath();
+  ctx.arc(screenX - spriteW*0.18, top + spriteH*0.1, eyeSize*0.5, 0, Math.PI*2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(screenX + spriteW*0.18, top + spriteH*0.1, eyeSize*0.5, 0, Math.PI*2);
+  ctx.fill();
+
+  // Brazos animados
+  const armSwing = Math.sin(Date.now() / 300) * spriteW*0.3;
+  ctx.strokeStyle = '#c8704a';
+  ctx.lineWidth = spriteW*0.3;
+  ctx.beginPath();
+  ctx.moveTo(screenX - spriteW*0.6, top + spriteH*0.35);
+  ctx.lineTo(screenX - spriteW*0.9 + armSwing, top + spriteH*0.5);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(screenX + spriteW*0.6, top + spriteH*0.35);
+  ctx.lineTo(screenX + spriteW*0.9 - armSwing, top + spriteH*0.5);
+  ctx.stroke();
+
+  // Piernas
+  ctx.fillStyle = '#1a1a2a';
+  const legSwing = Math.sin(Date.now() / 400) * spriteW*0.15;
+  ctx.fillRect(screenX - spriteW*0.3 + legSwing, top + spriteH*0.65, spriteW*0.25, spriteH*0.35);
+  ctx.fillRect(screenX + spriteW*0.05 - legSwing, top + spriteH*0.65, spriteW*0.25, spriteH*0.35);
+
+  ctx.restore();
+}
+
+function renderMinimap() {
+  const mm = $('minimap');
+  if (!mm) return;
+  const mc = mm.getContext('2d');
+  const cellSize = 150 / MAP_W;
+  
+  mc.fillStyle = '#0a0505';
+  mc.fillRect(0, 0, 150, 150);
+
+  for (let r = 0; r < MAP_H; r++) {
+    for (let c = 0; c < MAP_W; c++) {
+      const cell = MAP[r][c];
+      if (cell === 1) mc.fillStyle = '#443322';
+      else if (cell === 2) mc.fillStyle = '#113311';
+      else if (cell === 3) mc.fillStyle = '#333322';
+      else mc.fillStyle = '#0a0505';
+      mc.fillRect(c*cellSize, r*cellSize, cellSize, cellSize);
+    }
+  }
+
+  mc.fillStyle = '#ff4400';
+  mc.beginPath();
+  mc.arc(player.x*cellSize, player.y*cellSize, 2.5, 0, Math.PI*2);
+  mc.fill();
+
+  mc.fillStyle = '#ff0000';
+  mc.beginPath();
+  mc.arc(killer.x*cellSize, killer.y*cellSize, 2, 0, Math.PI*2);
+  mc.fill();
+}
+
+function canMoveTo(nx, ny) {
+  const margin = 0.35;
+  const checks = [
+    [Math.floor(nx+margin), Math.floor(ny+margin)],
+    [Math.floor(nx-margin), Math.floor(ny+margin)],
+    [Math.floor(nx+margin), Math.floor(ny-margin)],
+    [Math.floor(nx-margin), Math.floor(ny-margin)],
+  ];
+  for (const [cx,cy] of checks) {
+    if (cx<0||cx>=MAP_W||cy<0||cy>=MAP_H) return false;
+    const cell = MAP[cy][cx];
+    if (cell === 1 || cell === 3) return false;
+  }
+  return true;
+}
+
+function updatePlayer(dt) {
+  let moved = false;
+  const spd = player.speed * dt;
+
+  if (keys['KeyW'] || keys['ArrowUp']) {
+    const nx = player.x + Math.cos(player.angle) * spd;
+    const ny = player.y + Math.sin(player.angle) * spd;
+    if (canMoveTo(nx, player.y)) player.x = nx;
+    if (canMoveTo(player.x, ny)) player.y = ny;
+    moved = true;
+    noiseLevel = Math.min(100, noiseLevel + 6 * dt);
+  }
+  if (keys['KeyS'] || keys['ArrowDown']) {
+    const nx = player.x - Math.cos(player.angle) * spd;
+    const ny = player.y - Math.sin(player.angle) * spd;
+    if (canMoveTo(nx, player.y)) player.x = nx;
+    if (canMoveTo(player.x, ny)) player.y = ny;
+    moved = true;
+    noiseLevel = Math.min(100, noiseLevel + 6 * dt);
+  }
+  if (keys['KeyA']) { player.angle -= 2 * dt; moved = true; }
+  if (keys['KeyD']) { player.angle += 2 * dt; moved = true; }
+}
+
+function updateEnemy(dt) {
+  const dx = player.x - killer.x;
+  const dy = player.y - killer.y;
+  const dist = Math.sqrt(dx*dx + dy*dy);
+  
+  if (dist < 0.8) {
+    gameState = 'gameover';
+    cancelAnimationFrame(frameId);
+    $('hud').style.display = 'none';
+    $('game-canvas').style.display = 'none';
+    $('minimap').style.display = 'none';
+    $('game-over').classList.add('active');
+    return;
+  }
+
+  if (dist < 0.1) return;
+  const spd = killer.speed * dt;
+  const nx = killer.x + (dx/dist)*spd;
+  const ny = killer.y + (dy/dist)*spd;
+  
+  if (canMoveTo(nx, killer.y)) killer.x = nx;
+  if (canMoveTo(killer.x, ny)) killer.y = ny;
+  killer.angle = Math.atan2(dy, dx);
+}
+
+function updateNoise(dt) {
+  noiseLevel = Math.max(0, noiseLevel - 15*dt);
+  $('noise-bar-fill').style.width = noiseLevel + '%';
+}
+
+let lastTime = 0;
+function gameLoop(timestamp) {
+  if (gameState !== 'playing') return;
+  frameId = requestAnimationFrame(gameLoop);
+  
+  const dt = Math.min((timestamp - lastTime) / 1000, 0.05);
+  lastTime = timestamp;
+
+  updatePlayer(dt);
+  updateEnemy(dt);
+  updateNoise(dt);
+
+  renderScene();
+  if (killer.x >= 0) renderSprite(killer, '#1a0808', null);
+  renderMinimap();
+}
+
+function startGame() {
+  canvas.style.display = 'block';
+  $('hud').style.display = 'block';
+  $('minimap').style.display = 'block';
+  gameState = 'playing';
+  
+  player.x = 4.5;
+  player.y = 4.5;
+  player.angle = 0;
+  killer.x = 20.5;
+  killer.y = 20.5;
+  
+  resizeCanvas();
+  lastTime = performance.now();
+  frameId = requestAnimationFrame(gameLoop);
+  
+  canvas.requestPointerLock();
+}
+
+function resizeCanvas() {
+  W = window.innerWidth;
+  H = window.innerHeight;
+  canvas.width = W;
+  canvas.height = H;
+}
+
+window.addEventListener('resize', resizeCanvas);
+
+function showScreen(id) {
+  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+  $(id).classList.add('active');
+}
+
+function showMainMenu() {
+  gameState = 'menu';
+  cancelAnimationFrame(frameId);
+  canvas.style.display = 'none';
+  $('hud').style.display = 'none';
+  $('minimap').style.display = 'none';
+  showScreen('main-menu');
+}
+
+$('btn-new-game').onclick = startGame;
+$('btn-settings').onclick = () => alert('Ajustes en desarrollo');
+$('btn-quit').onclick = () => window.close();
+$('btn-retry').onclick = () => {
+  $('game-over').classList.remove('active');
+  showMainMenu();
+  setTimeout(() => showScreen('main-menu'), 100);
+};
+
+document.addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (e.code === 'Escape' && gameState === 'playing') {
+    document.exitPointerLock();
+    showMainMenu();
+  }
+});
+
+document.addEventListener('keyup', e => {
+  keys[e.code] = false;
+});
+
+canvas.addEventListener('click', () => {
+  if (gameState === 'playing') canvas.requestPointerLock();
+});
+
+document.addEventListener('pointerlockchange', () => {
+  isPointerLocked = document.pointerLockElement === canvas;
+});
+
+document.addEventListener('mousemove', e => {
+  if (!isPointerLocked || gameState !== 'playing') return;
+  player.angle += e.movementX * 0.003;
+});
+
+// LOADING
+resizeCanvas();
+const loadSteps = [[30, 'Cargando texturas...'], [60, 'Construyendo entorno...'], [90, 'Inicializando IA...'], [100, '¡Listo!']];
+let li = 0;
+const runLoader = () => {
+  if (li >= loadSteps.length) {
+    setTimeout(showMainMenu, 500);
+    return;
+  }
+  const [pct, msg] = loadSteps[li++];
+  $('loading-bar').style.width = pct + '%';
+  $('loading-text').textContent = msg;
+  setTimeout(runLoader, 300 + Math.random()*400);
+};
+runLoader();
+</script>
+</body>
+</html>
